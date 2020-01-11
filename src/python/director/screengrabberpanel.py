@@ -1,6 +1,7 @@
 import PythonQt
 from PythonQt import QtCore, QtGui, QtUiTools
 from director import applogic as app
+from director import lcmUtils
 from director.timercallback import TimerCallback
 from director.simpletimer import FPSCounter
 from director import ioUtils as io
@@ -10,6 +11,15 @@ import glob
 import time
 import datetime
 import itertools
+
+import bot_core as lcmbot
+
+# Currently, viewer lcm message types are in bot_core_lcmtypes and
+# robotlocomotion-lcmtypes, but drake only builds bot_core_lcmtypes.
+# When drake starts using robotlocomotion-lcmtypes, then the following
+# import can be used instead of getting viewer messages from bot_core_lcmtypes.
+#import robotlocomotion as lcmrl
+lcmrl = lcmbot
 
 def addWidgetsToDict(widgets, d):
 
@@ -41,6 +51,7 @@ class ScreenGrabberPanel(object):
         self.widget = loader.load(uifile)
         self.ui = WidgetDict(self.widget.children())
 
+        self.ui.syncFrameRateToDrawMessageCheck.connect('clicked()', self.onSyncFrameRateToDrawMessages)
         self.ui.lockViewSizeCheck.connect('clicked()', self.onLockViewSize)
         self.ui.screenshotOutputBrowseButton.connect('clicked()', self.onChooseScreenshotOutputDir)
         self.ui.movieOutputBrowseButton.connect('clicked()', self.onChooseMovieOutputDir)
@@ -65,6 +76,16 @@ class ScreenGrabberPanel(object):
         self.eventFilter.addFilteredEventType(QtCore.QEvent.Resize)
         self.eventFilter.connect('handleEvent(QObject*, QEvent*)', self.onEvent)
 
+        self.subscribers = lcmUtils.addSubscriber('DRAKE_VIEWER_DRAW', lcmrl.viewer_draw_t, self.onViewerDraw)
+
+    def onSyncFrameRateToDrawMessages(self):
+        self.ui.captureRateSpin.enabled = not self.ui.syncFrameRateToDrawMessageCheck.checked
+
+    def onViewerDraw(self, msg):
+        if not self.ui.syncFrameRateToDrawMessageCheck.checked or not self.ui.recordMovieButton.checked:
+            return
+        saveScreenshot(self.view, self.nextMovieFileName(), shouldRender=False)
+        self.ui.currentRateValueLabel.text = 'N/A'
 
     def onEvent(self, obj, event):
         minSize = self.ui.scrollArea.widget().minimumSizeHint.width() + self.ui.scrollArea.verticalScrollBar().width
@@ -170,6 +191,11 @@ class ScreenGrabberPanel(object):
 
         self.updateRecordingButtons()
 
+    def viewerDrawMessageReceived(self):
+        print('Draw message received')
+        if not self.ui.recordMovieButton.checked:
+            return
+
     def startRecording(self):
 
         self.frameCount = 0
@@ -197,8 +223,11 @@ class ScreenGrabberPanel(object):
         self.startT = time.time()
         interval = int(round(1000.0 / self.captureRate()))
 
-        self.recordTimer.setInterval(interval)
-        self.recordTimer.start()
+        # Start the timer, unless the frame writing is synced to the message
+        # drawing.
+        if not self.ui.syncFrameRateToDrawMessageCheck.checked:
+            self.recordTimer.setInterval(interval)
+            self.recordTimer.start()
 
     def stopRecording(self):
         self.recordTimer.stop()
@@ -209,12 +238,17 @@ class ScreenGrabberPanel(object):
 
         msg = 'Recorded %d frames.  For encoding, use this command line:\n\n\n' % self.frameCount
         msg += '    cd "%s"\n\n' % self.movieOutputDirectory()
-        msg += '    avconv -r %d -i frame_%%07d.tiff \\\n' % self.captureRate()
+        if self.ui.syncFrameRateToDrawMessageCheck.check:
+            msg += '    avconv -r 60 -i frame_%%07d.tiff \\\n'
+        else:
+            msg += '    avconv -r %d -i frame_%%07d.tiff \\\n' % self.captureRate()
         msg += '           -vcodec libx264 \\\n'
         msg += '           -preset slow \\\n'
         msg += '           -crf 18 \\\n'
         msg += '           -pix_fmt yuv420p \\\n'
         msg += '           output.mp4\n\n\n'
+        if self.ui.syncFrameRateToDrawMessageCheck.check:
+            msg += '(assuming that pose update messages are sent at 60 Hz)\n'
 
         app.showInfoMessage(msg, title='Recording Stopped')
 
